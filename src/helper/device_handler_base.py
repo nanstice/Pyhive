@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-from .const import HIVETOHA, HTTP_OK
+from .const import HIVE_TYPES, HIVETOHA, HTTP_OK, LIGHT_GROUP_NODE_TYPE
 from .hive_exceptions import HiveAuthError, HiveRateLimited
 from .hivedataclasses import Device
 
@@ -82,7 +82,12 @@ class BaseDeviceHandler:  # pylint: disable=too-few-public-methods
             )
             return False
         await self.session.hive_refresh_tokens()
-        product_type = self.session.data.products[device.hive_id]["type"]
+        product = self.session.data.products[device.hive_id]
+        product_type = product["type"]
+        if product.get("isGroup") and product_type in HIVE_TYPES["Light"]:
+            # Hive's app changes a light group at /nodes/productgroup/<id>;
+            # posting to /nodes/<light type>/<id> gets 400 MALFORMED_REQUEST.
+            product_type = LIGHT_GROUP_NODE_TYPE
         resp = await self._send_state_with_recovery(product_type, device, state_kwargs)
         if resp is None:
             return False

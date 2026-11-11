@@ -151,7 +151,7 @@ class TestLightGroupControl:
         group = _group_entities(hive, "light")[0]
         assert await hive.light.turn_on(group, None, None, None) is True
         hive.api.set_state.assert_awaited_once_with(
-            "warmwhitelight", _GROUP_ID, status="ON"
+            "productgroup", _GROUP_ID, status="ON"
         )
 
     async def test_turn_off_posts_once_to_group(self, hive):
@@ -159,7 +159,7 @@ class TestLightGroupControl:
         group = _group_entities(hive, "light")[0]
         assert await hive.light.turn_off(group) is True
         hive.api.set_state.assert_awaited_once_with(
-            "warmwhitelight", _GROUP_ID, status="OFF"
+            "productgroup", _GROUP_ID, status="OFF"
         )
 
     async def test_brightness_posts_once_to_group(self, hive):
@@ -167,5 +167,5 @@ class TestLightGroupControl:
         group = _group_entities(hive, "light")[0]
         assert await hive.light.turn_on(group, 40, None, None) is True
         hive.api.set_state.assert_awaited_once_with(
-            "warmwhitelight", _GROUP_ID, status="ON", brightness=40
+            "productgroup", _GROUP_ID, status="ON", brightness=40
         )

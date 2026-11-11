@@ -167,6 +167,24 @@ class TestExecuteStateChange:
         session.refresh_after_change.assert_awaited_once_with()
         session.get_devices.assert_not_called()
 
+    async def test_light_group_posts_to_productgroup(self):
+        """A light group is changed at /nodes/productgroup/<id>."""
+        session = _make_session({"prod-1": {"type": "warmwhitelight", "isGroup": True}})
+        h = _make_handler(session)
+        assert await h._execute_state_change(_make_device(), status="ON") is True
+        session.api.set_state.assert_awaited_once_with(
+            "productgroup", "prod-1", status="ON"
+        )
+
+    async def test_heating_group_keeps_its_own_type(self):
+        """Heating groups still post to their own type, which Hive accepts."""
+        session = _make_session({"prod-1": {"type": "heating", "isGroup": True}})
+        h = _make_handler(session)
+        assert await h._execute_state_change(_make_device(), mode="MANUAL") is True
+        session.api.set_state.assert_awaited_once_with(
+            "heating", "prod-1", mode="MANUAL"
+        )
+
     async def test_non_200_returns_false(self):
         """Returns False on non-200 HTTP status and does not call get_devices."""
         session = _make_session({"prod-1": {"type": "heating"}})

@@ -60,6 +60,8 @@ HIVETOHA: dict[str, Any] = {
     "Switch": {"ON": True, "OFF": False},
 }
 
+LIGHT_GROUP_NODE_TYPE = "productgroup"
+
 HIVE_TYPES = {
     "Hub": ["hub", "sense"],
     "Thermo": ["thermostatui", "trv"],
