@@ -13,7 +13,12 @@ from aiohttp import (
     web_exceptions,
 )
 
-from ..helper.const import HTTP_FORBIDDEN, HTTP_TOO_MANY_REQUESTS, HTTP_UNAUTHORIZED
+from ..helper.const import (
+    HTTP_FORBIDDEN,
+    HTTP_TOO_MANY_REQUESTS,
+    HTTP_UNAUTHORIZED,
+    MAX_REQUESTS_PER_SECOND,
+)
 from ..helper.hive_exceptions import (
     FileInUse,
     HiveApiError,
@@ -53,6 +58,25 @@ class HiveApiAsync:
         }
         self.session = hive_session
         self.websession = websession
+        # Hive blocks callers that send requests too fast, so space every
+        # request evenly instead of letting a burst through.
+        self.min_request_interval = 1 / MAX_REQUESTS_PER_SECOND
+        self._next_request_at = 0.0
+
+    async def _wait_for_request_slot(self) -> None:
+        """Wait until this request may start, keeping requests evenly spaced.
+
+        Each caller reserves the next free slot before sleeping, so concurrent
+        callers queue in arrival order and none starts less than
+        ``min_request_interval`` after the one before.
+        """
+        now = time.monotonic()
+        slot = max(now, self._next_request_at)
+        self._next_request_at = slot + self.min_request_interval
+        delay = slot - now
+        if delay > 0:
+            _LOGGER.debug("Pacing Hive API request — waiting %.2fs", delay)
+            await asyncio.sleep(delay)
 
     def _get_websession(self) -> ClientSession:
         """Return the shared ClientSession, creating it on first use.
@@ -89,6 +113,7 @@ class HiveApiAsync:
             auth_token[-4:] if len(auth_token) >= 4 else auth_token,  # noqa: PLR2004
         )
 
+        await self._wait_for_request_slot()
         timeout = ClientTimeout(total=self.timeout)
         req_start = time.monotonic()
         async with self._get_websession().request(

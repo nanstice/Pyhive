@@ -6,7 +6,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from apyhiveapi.helper.const import MAX_CONCURRENT_WRITES
 from apyhiveapi.helper.device_handler_base import BaseDeviceHandler
 from apyhiveapi.helper.hive_exceptions import (
     HiveApiError,
@@ -34,7 +33,6 @@ def _make_session(products=None):
     session.get_devices = AsyncMock(return_value=True)
     session.refresh_after_change = AsyncMock(return_value=True)
     session.recover_auth = AsyncMock()
-    session.write_semaphore = asyncio.Semaphore(MAX_CONCURRENT_WRITES)
     session.api = MagicMock()
     session.api.set_state = AsyncMock(return_value={"original": 200, "parsed": {}})
     return session
@@ -199,34 +197,7 @@ class TestExecuteStateChange:
 
 
 class TestExecuteStateChangeRateLimiting:
-    """Write limit, auth recovery and 429 handling in _execute_state_change."""
-
-    async def test_concurrent_writes_capped_by_semaphore(self):
-        """A burst of changes never has more than MAX_CONCURRENT_WRITES in flight."""
-        products = {f"prod-{i}": {"type": "warmwhitelight"} for i in range(10)}
-        session = _make_session(products)
-        in_flight = 0
-        peak = 0
-
-        async def _set_state(*_args, **_kwargs):
-            nonlocal in_flight, peak
-            in_flight += 1
-            peak = max(peak, in_flight)
-            await asyncio.sleep(0.01)
-            in_flight -= 1
-            return {"original": 200, "parsed": {}}
-
-        session.api.set_state = AsyncMock(side_effect=_set_state)
-        h = _make_handler(session)
-        results = await asyncio.gather(
-            *(
-                h._execute_state_change(_make_device(hive_id=pid), status="ON")
-                for pid in products
-            )
-        )
-        assert all(results)
-        assert session.api.set_state.await_count == len(products)
-        assert peak == MAX_CONCURRENT_WRITES
+    """Auth recovery and 429 handling in _execute_state_change."""
 
     async def test_auth_error_recovers_and_retries_once(self):
         """A 401/403 renews tokens with the pre-request timestamp and retries."""

@@ -335,6 +335,19 @@ class DiscoveryMixin:
                 product_type,
             )
 
+            if p.get("isGroup", False) and p["type"] in HIVE_TYPES["Light"]:
+                # One light entity per group; a change to it is a single
+                # request to the group. Its member lights keep their own
+                # entities, so the diagnostic sensors aren't duplicated.
+                _LOGGER.debug(
+                    "create_devices - Adding light group %s: %s",
+                    product_name,
+                    self.helper.sanitize_payload(p),
+                )
+                self.add_list("light", p)
+                product_count += 1
+                continue
+
             if p.get("isGroup", False) and p["type"] not in HIVE_TYPES["Heating"]:
                 _LOGGER.debug(
                     "create_devices - Skipping group product currently not supported %s (type: %s)",

@@ -9,7 +9,6 @@ from aiohttp import ClientSession
 from apyhiveapi import API, Auth  # type: ignore[import-not-found]
 
 from ..helper.compat_aliases import SessionCompatMixin
-from ..helper.const import MAX_CONCURRENT_WRITES
 from ..helper.device_attributes import HiveAttributes
 from ..helper.hive_helper import HiveHelper
 from ..helper.hivedataclasses import Device, SessionConfig, SessionTokens
@@ -58,7 +57,6 @@ class HiveSession(SessionCompatMixin, SessionAuthMixin, PollingMixin, DiscoveryM
         self.update_lock = asyncio.Lock()
         self._refresh_lock = asyncio.Lock()
         self._login_lock = asyncio.Lock()
-        self.write_semaphore = asyncio.Semaphore(MAX_CONCURRENT_WRITES)
         self._last_refresh_started = 0.0
         self.tokens = SessionTokens()
         self.config = SessionConfig(username=username)

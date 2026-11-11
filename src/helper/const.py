@@ -29,10 +29,10 @@ HTTP_SERVICE_UNAVAILABLE = 503
 
 EXPECTED_DEVICE_DATA_LENGTH = 3
 
-# Most state-change requests sent to Hive at once. Home Assistant runs a scene
-# or group's service calls in parallel; capping them keeps Hive from rejecting
-# the burst.
-MAX_CONCURRENT_WRITES = 3
+# Most requests sent to the Hive API per second, spaced evenly. Home Assistant
+# runs a scene or group's service calls in parallel, and Hive answers a burst
+# with 403 Forbidden; pacing makes the burst queue instead.
+MAX_REQUESTS_PER_SECOND = 3
 
 # Seconds to wait after a state change before refreshing device data, so the
 # changes in a burst share one refresh instead of fetching everything each.

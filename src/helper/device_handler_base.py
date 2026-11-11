@@ -19,13 +19,6 @@ class BaseDeviceHandler:  # pylint: disable=too-few-public-methods
 
     session: Any
 
-    async def _send_state(self, product_type: str, device: Device, state_kwargs):
-        """POST the new state, holding a slot in the session's write limit."""
-        async with self.session.write_semaphore:
-            return await self.session.api.set_state(
-                product_type, device.hive_id, **state_kwargs
-            )
-
     async def _send_state_with_recovery(
         self, product_type: str, device: Device, state_kwargs
     ) -> dict | None:
@@ -36,9 +29,10 @@ class BaseDeviceHandler:  # pylint: disable=too-few-public-methods
         doesn't abort a multi-entity service call in Home Assistant.
         """
         token_seen = self.session.tokens.token_created
+        set_state = self.session.api.set_state
         try:
             try:
-                return await self._send_state(product_type, device, state_kwargs)
+                return await set_state(product_type, device.hive_id, **state_kwargs)
             except HiveAuthError:
                 _LOGGER.warning(
                     "_execute_state_change - Hive rejected the token for %s, "
@@ -46,7 +40,7 @@ class BaseDeviceHandler:  # pylint: disable=too-few-public-methods
                     device.ha_name,
                 )
                 await self.session.recover_auth(token_seen)
-                return await self._send_state(product_type, device, state_kwargs)
+                return await set_state(product_type, device.hive_id, **state_kwargs)
         except asyncio.TimeoutError:
             _LOGGER.warning(
                 "_execute_state_change - set_state timed out for %s", device.ha_name

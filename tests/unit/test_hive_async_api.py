@@ -8,6 +8,7 @@ import aiohttp
 import pytest
 from aiohttp import web_exceptions
 from apyhiveapi.api.hive_async_api import HiveApiAsync
+from apyhiveapi.helper.const import MAX_REQUESTS_PER_SECOND
 from apyhiveapi.helper.hive_exceptions import (
     FileInUse,
     HiveApiError,
@@ -124,6 +125,37 @@ class TestHiveApiAsyncRequest:
 
     def test_parse_retry_after_rejects_negative(self):
         assert HiveApiAsync._parse_retry_after("-3") is None  # noqa: SLF001
+
+
+class TestRequestPacing:
+    """Requests are spaced evenly at MAX_REQUESTS_PER_SECOND."""
+
+    def test_default_interval_is_three_per_second(self):
+        api = _make_api()
+        assert api.min_request_interval == pytest.approx(1 / MAX_REQUESTS_PER_SECOND)
+
+    async def test_burst_is_spaced_evenly_in_arrival_order(self):
+        """Six concurrent requests wait 0, 1, 2 … intervals, in order."""
+        api = _make_api()
+        delays = []
+
+        async def _fake_sleep(delay):
+            delays.append(delay)
+
+        url = "https://beekeeper.hivehome.com/1.0/nodes/all"
+        with patch("apyhiveapi.api.hive_async_api.asyncio.sleep", _fake_sleep):
+            await asyncio.gather(*(api.request("get", url) for _ in range(6)))
+        interval = api.min_request_interval
+        assert delays == pytest.approx([interval * n for n in range(1, 6)], abs=0.05)
+        assert api.websession.request.call_count == 6  # noqa: PLR2004
+
+    async def test_request_after_quiet_period_is_not_delayed(self):
+        """Once the interval has passed, the next request starts at once."""
+        api = _make_api()
+        api._next_request_at = 0.0  # noqa: SLF001 - last slot long ago
+        with patch("apyhiveapi.api.hive_async_api.asyncio.sleep", AsyncMock()) as sleep:
+            await api.request("get", "https://beekeeper.hivehome.com/1.0/nodes/all")
+        sleep.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
