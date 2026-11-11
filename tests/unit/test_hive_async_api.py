@@ -12,6 +12,7 @@ from apyhiveapi.helper.hive_exceptions import (
     FileInUse,
     HiveApiError,
     HiveAuthError,
+    HiveRateLimited,
     NoApiToken,
 )
 
@@ -107,6 +108,22 @@ class TestHiveApiAsyncRequest:
         api = _make_api(status=404)
         with pytest.raises(HiveApiError):
             await api.request("get", "https://beekeeper.hivehome.com/1.0/nodes/all")
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [("7", 7.0), ("0", 0.0), (None, None), ("Wed, 21 Oct 2026 07:28:00 GMT", None)],
+    )
+    async def test_429_raises_rate_limited_with_retry_after(self, header, expected):
+        api = _make_api(status=429)
+        headers = {} if header is None else {"Retry-After": header}
+        api.websession.request.return_value.headers = headers
+        with pytest.raises(HiveRateLimited) as exc_info:
+            await api.request("get", "https://beekeeper.hivehome.com/1.0/nodes/all")
+        assert exc_info.value.retry_after == expected
+        assert isinstance(exc_info.value, HiveApiError)
+
+    def test_parse_retry_after_rejects_negative(self):
+        assert HiveApiAsync._parse_retry_after("-3") is None  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

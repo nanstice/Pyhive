@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from .const import HIVETOHA, HTTP_OK
+from .hive_exceptions import HiveAuthError, HiveRateLimited
 from .hivedataclasses import Device
 
 _LOGGER = logging.getLogger(__name__)
@@ -18,12 +19,60 @@ class BaseDeviceHandler:  # pylint: disable=too-few-public-methods
 
     session: Any
 
+    async def _send_state(self, product_type: str, device: Device, state_kwargs):
+        """POST the new state, holding a slot in the session's write limit."""
+        async with self.session.write_semaphore:
+            return await self.session.api.set_state(
+                product_type, device.hive_id, **state_kwargs
+            )
+
+    async def _send_state_with_recovery(
+        self, product_type: str, device: Device, state_kwargs
+    ) -> dict | None:
+        """Send the state change, renewing tokens and retrying once on 401/403.
+
+        Returns the API response, or None after a timeout, a 429 or a second
+        rejection. Returning None rather than raising means one failed device
+        doesn't abort a multi-entity service call in Home Assistant.
+        """
+        token_seen = self.session.tokens.token_created
+        try:
+            try:
+                return await self._send_state(product_type, device, state_kwargs)
+            except HiveAuthError:
+                _LOGGER.warning(
+                    "_execute_state_change - Hive rejected the token for %s, "
+                    "renewing it and retrying once",
+                    device.ha_name,
+                )
+                await self.session.recover_auth(token_seen)
+                return await self._send_state(product_type, device, state_kwargs)
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "_execute_state_change - set_state timed out for %s", device.ha_name
+            )
+        except HiveRateLimited:
+            _LOGGER.warning(
+                "_execute_state_change - Hive rate limited the change for %s",
+                device.ha_name,
+            )
+        except HiveAuthError:
+            _LOGGER.error(
+                "_execute_state_change - Hive still rejected the change for %s "
+                "after renewing the token",
+                device.ha_name,
+            )
+        return None
+
     async def _execute_state_change(self, device: Device, **state_kwargs) -> bool:
-        """Check online → refresh tokens → set_state → get_devices.
+        """Check online → refresh tokens → set_state → refresh device data.
 
         Returns True on HTTP 200, False on failure or when device is
         unavailable.  Uses the product type stored in session.data so callers
         never need to read it themselves.
+
+        A 401/403 renews the tokens and retries once. A 429 or a second
+        rejection returns False. Only ``HiveReauthRequired`` is raised.
         """
         if device.hive_id not in self.session.data.products:
             _LOGGER.debug(
@@ -39,20 +88,12 @@ class BaseDeviceHandler:  # pylint: disable=too-few-public-methods
             )
             return False
         await self.session.hive_refresh_tokens()
-        data = self.session.data.products[device.hive_id]
-        try:
-            resp = await self.session.api.set_state(
-                data["type"], device.hive_id, **state_kwargs
-            )
-        except asyncio.TimeoutError:
-            # Honour the documented False-on-failure contract so one slow
-            # device doesn't abort a multi-entity service call.
-            _LOGGER.warning(
-                "_execute_state_change - set_state timed out for %s", device.ha_name
-            )
+        product_type = self.session.data.products[device.hive_id]["type"]
+        resp = await self._send_state_with_recovery(product_type, device, state_kwargs)
+        if resp is None:
             return False
         if resp.get("original") == HTTP_OK:
-            await self.session.get_devices(device.hive_id)
+            await self.session.refresh_after_change()
             return True
         _LOGGER.error(
             "_execute_state_change - set_state failed for %s: HTTP %s",

@@ -38,6 +38,7 @@ def _make_hotwater(products=None, devices=None):
     session.api.set_state = AsyncMock(return_value={"original": 200, "parsed": {}})
     session.hive_refresh_tokens = AsyncMock()
     session.get_devices = AsyncMock(return_value=True)
+    session.refresh_after_change = AsyncMock(return_value=True)
     session.should_use_cached_data = MagicMock(return_value=False)
     session.get_cached_device = MagicMock(return_value=None)
     session.set_cached_device = MagicMock(side_effect=lambda d: d)

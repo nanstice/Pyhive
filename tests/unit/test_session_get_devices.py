@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from apyhiveapi.helper.hive_exceptions import (
     HiveAuthError,
+    HiveRateLimited,
     HiveReauthRequired,
 )
 from apyhiveapi.helper.hivedataclasses import Device, SessionConfig
@@ -199,9 +200,96 @@ class TestGetDevicesTokensPath:
             "parsed": {"user": {"id": "retry-user"}},
         }
         result = await p.get_devices("No_ID")
-        p._retry_login.assert_called_once()
+        p._retry_login.assert_called_once_with(p.tokens.token_created)
         p._retry_with_backoff.assert_called_once()
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# get_devices — 429 rate limiting
+# ---------------------------------------------------------------------------
+
+
+class TestGetDevicesRateLimited:
+    """get_devices backs off when Hive answers 429."""
+
+    @pytest.mark.parametrize(
+        ("retry_after", "expected_wait"),
+        [(120, 120), (None, None), (1, None)],
+    )
+    async def test_backs_off_for_retry_after_or_scan_interval(
+        self, retry_after, expected_wait
+    ):
+        """Next poll waits max(Retry-After, scan_interval) and keeps cached data."""
+        p = _make_stub()
+        p.tokens = MagicMock()
+        p.data.products = {"p1": {"id": "p1"}}
+        p.api.get_all.side_effect = HiveRateLimited(retry_after=retry_after)
+        before = datetime.now()
+        result = await p.get_devices("No_ID")
+        after = datetime.now()
+        assert result is False
+        assert p.data.products == {"p1": {"id": "p1"}}
+        wait = (
+            timedelta(seconds=expected_wait)
+            if expected_wait is not None
+            else p.config.scan_interval
+        )
+        next_poll = p.config.last_update + p.config.scan_interval
+        assert before + wait <= next_poll <= after + wait
+
+
+# ---------------------------------------------------------------------------
+# refresh_after_change — one fetch per burst of state changes
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshAfterChange:
+    """refresh_after_change merges the refreshes of concurrent state changes."""
+
+    def _stub(self):
+        p = _make_stub()
+        p.tokens = MagicMock()
+        p._last_refresh_started = 0.0
+        return p
+
+    async def test_concurrent_changes_share_one_fetch(self):
+        """Ten changes finishing together trigger a single /nodes/all fetch."""
+        p = self._stub()
+        with patch("apyhiveapi.session.polling.STATE_CHANGE_REFRESH_DELAY", 0.05):
+            results = await asyncio.gather(
+                *(p.refresh_after_change() for _ in range(10))
+            )
+        assert all(results)
+        assert p.api.get_all.await_count == 1
+
+    async def test_fetch_started_before_change_does_not_count(self):
+        """A fetch that began before this change finished is not reused."""
+        p = self._stub()
+        p._last_refresh_started = 1.0  # long before the change
+        with patch("apyhiveapi.session.polling.STATE_CHANGE_REFRESH_DELAY", 0):
+            assert await p.refresh_after_change() is True
+        assert p.api.get_all.await_count == 1
+
+    async def test_returns_fetch_result_on_failure(self):
+        """A failed fetch is reported as False to the caller."""
+        p = self._stub()
+        p.api.get_all.side_effect = OSError("down")
+        with patch("apyhiveapi.session.polling.STATE_CHANGE_REFRESH_DELAY", 0):
+            assert await p.refresh_after_change() is False
+
+    async def test_waits_for_background_poll_and_reuses_it(self):
+        """A change that waits on update_lock reuses a fetch that started after it."""
+        p = self._stub()
+        await p.update_lock.acquire()
+        with patch("apyhiveapi.session.polling.STATE_CHANGE_REFRESH_DELAY", 0.05):
+            task = asyncio.create_task(p.refresh_after_change())
+            await asyncio.sleep(0.1)
+            # A background poll runs (and stamps the time) while the lock is held.
+            await p.get_devices("No_ID")
+            p.update_lock.release()
+            assert await task is True
+        assert p.api.get_all.await_count == 1
 
 
 # ---------------------------------------------------------------------------

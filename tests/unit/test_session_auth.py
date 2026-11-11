@@ -13,6 +13,7 @@ from apyhiveapi.helper.hive_exceptions import (
     HiveInvalidDeviceAuthentication,
     HiveInvalidUsername,
     HiveReauthRequired,
+    HiveRefreshTokenExpired,
     HiveUnknownConfiguration,
 )
 from apyhiveapi.helper.hivedataclasses import SessionConfig, SessionTokens
@@ -50,6 +51,7 @@ def _make_stub():
     s.helper.sanitize_payload = MagicMock(return_value={})
     s._refresh_threshold = 0.90
     s._refresh_lock = asyncio.Lock()
+    s._login_lock = asyncio.Lock()
     return s
 
 
@@ -233,6 +235,72 @@ class TestSms2faExtended:
 # ---------------------------------------------------------------------------
 # _retry_login
 # ---------------------------------------------------------------------------
+
+
+class TestLoginSerialised:
+    """Concurrent auth failures share one login / token renewal."""
+
+    async def test_concurrent_retry_logins_log_in_once(self):
+        """Ten callers that saw the same tokens fail cause a single login."""
+        s = _make_stub()
+        seen = s.tokens.token_created
+
+        async def _login():
+            await asyncio.sleep(0.01)
+            return AUTH_RESULT
+
+        s.auth.login.side_effect = _login
+        await asyncio.gather(*(s._retry_login(seen) for _ in range(10)))
+        assert s.auth.login.await_count == 1
+
+    async def test_retry_login_skips_when_tokens_already_renewed(self):
+        """A caller holding stale tokens skips login if they changed meanwhile."""
+        s = _make_stub()
+        stale = s.tokens.token_created
+        s.tokens.token_created = datetime.now()
+        await s._retry_login(stale)
+        s.auth.login.assert_not_called()
+
+    async def test_recover_auth_uses_refresh_token(self):
+        """recover_auth renews tokens through the refresh token first."""
+        s = _make_stub()
+        s.auth.refresh_token.return_value = AUTH_RESULT
+        await s.recover_auth(s.tokens.token_created)
+        s.auth.refresh_token.assert_awaited_once_with("rt")
+        s.auth.login.assert_not_called()
+        assert s.tokens.token_data["token"] == "id-tok"
+
+    async def test_recover_auth_concurrent_callers_refresh_once(self):
+        """Callers that saw the same rejected tokens share one refresh."""
+        s = _make_stub()
+        s.auth.refresh_token.return_value = AUTH_RESULT
+        seen = s.tokens.token_created
+        await asyncio.gather(*(s.recover_auth(seen) for _ in range(5)))
+        s.auth.refresh_token.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "refresh",
+        [
+            {"side_effect": HiveFailedToRefreshTokens()},
+            {"side_effect": HiveRefreshTokenExpired()},
+            {"return_value": None},
+        ],
+    )
+    async def test_recover_auth_falls_back_to_login(self, refresh):
+        """A failed or empty refresh falls back to a full login."""
+        s = _make_stub()
+        s.auth.refresh_token = AsyncMock(**refresh)
+        s.auth.login.return_value = AUTH_RESULT
+        await s.recover_auth(s.tokens.token_created)
+        s.auth.login.assert_awaited_once()
+
+    async def test_recover_auth_login_needing_sms_raises_reauth(self):
+        """If the fallback login needs SMS, HiveReauthRequired propagates."""
+        s = _make_stub()
+        s.auth.refresh_token.side_effect = HiveRefreshTokenExpired()
+        s.auth.login.return_value = {"ChallengeName": "SMS_MFA"}
+        with pytest.raises(HiveReauthRequired):
+            await s.recover_auth(s.tokens.token_created)
 
 
 class TestRetryLogin:

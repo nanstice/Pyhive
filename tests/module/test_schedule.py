@@ -51,11 +51,12 @@ def _make_session(products):
     session.api.set_state = AsyncMock(return_value={"original": _HTTP_OK, "parsed": {}})
     session.hive_refresh_tokens = AsyncMock()
     session.get_devices = AsyncMock(return_value=True)
+    session.refresh_after_change = AsyncMock(return_value=True)
     return session
 
 
 def _make_climate(schedule=None, product_type="heating"):
-    """Climate whose product carries *schedule*; get_devices leaves it unchanged."""
+    """Climate whose product carries *schedule*; the refresh leaves it unchanged."""
     products = {"heat-1": {"type": product_type, "state": {}}}
     if schedule is not None:
         products["heat-1"]["state"]["schedule"] = schedule
@@ -81,16 +82,16 @@ def _device(hive_id="heat-1", ha_type="climate", online=True):
 
 
 def _simulate_hive_storing(climate, hive_id="heat-1"):
-    """Make get_devices copy the posted schedule into the product, as Hive does."""
+    """Make the post-change refresh copy the posted schedule into the product, as Hive does."""
 
-    async def _store(_id):
+    async def _store():
         _, kwargs = climate.session.api.set_state.call_args
         climate.session.data.products[hive_id]["state"]["schedule"] = copy.deepcopy(
             kwargs["schedule"]
         )
         return True
 
-    climate.session.get_devices = AsyncMock(side_effect=_store)
+    climate.session.refresh_after_change = AsyncMock(side_effect=_store)
 
 
 class TestGetSchedule:
@@ -171,7 +172,7 @@ class TestSetScheduleHeating:
             return_value={"original": _HTTP_BAD, "parsed": {}}
         )
         assert await climate.set_schedule(_device(), _heating_week(9, 9)) is False
-        climate.session.get_devices.assert_not_called()
+        climate.session.refresh_after_change.assert_not_called()
 
     async def test_returns_false_when_offline(self):
         """Offline devices short-circuit before any API call."""
@@ -183,7 +184,7 @@ class TestSetScheduleHeating:
 
     async def test_returns_false_when_hive_silently_ignores(self):
         """Hive answers 200 but the refreshed product still has the old week."""
-        climate = _make_climate(_heating_week())  # get_devices is a no-op
+        climate = _make_climate(_heating_week())  # the refresh is a no-op
         assert await climate.set_schedule(_device(), _heating_week(9, 9)) is False
         climate.session.api.set_state.assert_called_once()
 

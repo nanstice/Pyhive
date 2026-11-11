@@ -10,7 +10,13 @@ from typing import Any
 
 from aiohttp.web import HTTPException
 
-from ..helper.hive_exceptions import HiveApiError, HiveAuthError, HiveReauthRequired
+from ..helper.const import STATE_CHANGE_REFRESH_DELAY
+from ..helper.hive_exceptions import (
+    HiveApiError,
+    HiveAuthError,
+    HiveRateLimited,
+    HiveReauthRequired,
+)
 from ..helper.hivedataclasses import Device
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,6 +55,7 @@ class PollingMixin:
     _last_poll_slow: bool
     _slow_poll_threshold: int
     _stale_state_polls: dict[str, int]
+    _last_refresh_started: float
 
     @staticmethod
     def _entity_cache_key(device) -> str:
@@ -162,6 +169,29 @@ class PollingMixin:
         self.config.scan_interval = max(new_interval, MIN_SCAN_INTERVAL)
         return True
 
+    async def refresh_after_change(self) -> bool:
+        """Refresh device data after a state change, sharing one fetch per burst.
+
+        Waits ``STATE_CHANGE_REFRESH_DELAY`` so other changes in the same burst
+        can finish, then fetches once under ``update_lock``. A caller whose
+        change finished before another fetch started skips its own fetch,
+        because that fetch already includes its change. So N lights changed
+        together cost one ``/nodes/all`` request, not N.
+
+        Returns:
+            bool: True if fresh data is in place (fetched here or by a fetch
+            that started after this caller's change), False if the fetch failed.
+        """
+        changed_at = time.monotonic()
+        await asyncio.sleep(STATE_CHANGE_REFRESH_DELAY)
+        async with self.update_lock:
+            if self._last_refresh_started > changed_at:
+                _LOGGER.debug(
+                    "refresh_after_change - Covered by a refresh already made."
+                )
+                return True
+            return await self.get_devices("No_ID")
+
     async def _poll_devices(self) -> bool:
         """Fetch latest device state from the Hive API."""
         return await self.get_devices("No_ID")
@@ -222,6 +252,7 @@ class PollingMixin:
         """
         get_nodes_successful = False
         api_resp_d = None
+        self._last_refresh_started = time.monotonic()
 
         try:
             if self.config.file:
@@ -234,6 +265,7 @@ class PollingMixin:
                 await self.hive_refresh_tokens()  # type: ignore[attr-defined]
                 _LOGGER.debug("get_devices - Fetching all devices from Hive API.")
                 api_call_start = time.monotonic()
+                token_seen = self.tokens.token_created
                 try:
                     api_resp_d = await self.api.get_all()
                     api_call_duration = time.monotonic() - api_call_start
@@ -251,7 +283,7 @@ class PollingMixin:
                         "Auth error (401/403) after token refresh, "
                         "falling back to full device re-login."
                     )
-                    await self._retry_login()  # type: ignore[attr-defined]
+                    await self._retry_login(token_seen)  # type: ignore[attr-defined]
                     api_resp_d = await self._retry_with_backoff(  # type: ignore[attr-defined]
                         self.api.get_all,
                         reraise_as=HiveReauthRequired,
@@ -314,6 +346,16 @@ class PollingMixin:
             self.config.last_update = (
                 datetime.now() - self.config.scan_interval + timedelta(seconds=30)
             )
+            get_nodes_successful = False
+        except HiveRateLimited as err:
+            wait = max(
+                timedelta(seconds=err.retry_after or 0), self.config.scan_interval
+            )
+            _LOGGER.warning(
+                "Hive API rate limited — keeping cached device data, next poll in %ss.",
+                int(wait.total_seconds()),
+            )
+            self.config.last_update = datetime.now() - self.config.scan_interval + wait
             get_nodes_successful = False
         except (
             OSError,

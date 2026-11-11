@@ -229,7 +229,7 @@ class TestGetDevicesSlowPoll:
             "parsed": {"products": [], "devices": [], "actions": []},
         }
 
-        async def fake_retry_login():
+        async def fake_retry_login(_seen=None):
             pass
 
         async def fake_retry_with_backoff(_fn, **_kwargs):

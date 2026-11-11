@@ -29,6 +29,15 @@ HTTP_SERVICE_UNAVAILABLE = 503
 
 EXPECTED_DEVICE_DATA_LENGTH = 3
 
+# Most state-change requests sent to Hive at once. Home Assistant runs a scene
+# or group's service calls in parallel; capping them keeps Hive from rejecting
+# the burst.
+MAX_CONCURRENT_WRITES = 3
+
+# Seconds to wait after a state change before refreshing device data, so the
+# changes in a burst share one refresh instead of fetching everything each.
+STATE_CHANGE_REFRESH_DELAY = 0.5
+
 
 HIVETOHA: dict[str, Any] = {
     "Attribute": {True: "Online", False: "Offline"},

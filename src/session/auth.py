@@ -36,6 +36,7 @@ class SessionAuthMixin:
     helper: Any
     _refresh_threshold: float
     _refresh_lock: asyncio.Lock
+    _login_lock: asyncio.Lock
 
     async def _retry_with_backoff(
         self,
@@ -264,11 +265,18 @@ class SessionAuthMixin:
 
         return result
 
-    async def _retry_login(self):
-        """Attempt login with retries and backoff.
+    async def _retry_login(self, seen_token_created: datetime | None = None):
+        """Attempt login with retries and backoff, one login at a time.
 
         This is called when token refresh fails. It attempts to login again,
         which may succeed via device login or may require user interaction (SMS 2FA).
+
+        Concurrent callers share one login: if tokens were renewed while a
+        caller waited for the lock, it returns without logging in again.
+
+        Args:
+            seen_token_created: ``tokens.token_created`` as the caller saw it
+                when its request failed. Defaults to the value on entry.
 
         Raises:
             HiveReauthRequired: User interaction required (SMS 2FA challenge),
@@ -279,6 +287,52 @@ class SessionAuthMixin:
         if every attempt fails ``HiveReauthRequired`` is raised so Home Assistant
         asks the user to log in again.
         """
+        if seen_token_created is None:
+            seen_token_created = self.tokens.token_created
+        async with self._login_lock:
+            if self.tokens.token_created != seen_token_created:
+                _LOGGER.debug(
+                    "_retry_login - Tokens renewed by another caller, skipping login."
+                )
+                return
+            await self._login_with_retries()
+
+    async def recover_auth(self, seen_token_created: datetime) -> None:
+        """Renew tokens after Hive rejected a request with 401/403.
+
+        Tries the refresh token first and falls back to a full login. Runs one
+        recovery at a time; callers whose tokens were already renewed by
+        another caller return straight away.
+
+        Args:
+            seen_token_created: ``tokens.token_created`` when the rejected
+                request was sent.
+
+        Raises:
+            HiveReauthRequired: The user must log in again.
+        """
+        async with self._login_lock:
+            if self.tokens.token_created != seen_token_created:
+                _LOGGER.debug(
+                    "recover_auth - Tokens renewed by another caller, reusing them."
+                )
+                return
+            try:
+                result = await self.auth.refresh_token(
+                    self.tokens.token_data.get("refreshToken")
+                )
+                if result and "AuthenticationResult" in result:
+                    await self.update_tokens(result)
+                    return
+            except (HiveRefreshTokenExpired, HiveFailedToRefreshTokens) as exc:
+                _LOGGER.warning(
+                    "recover_auth - Token refresh failed (%s), falling back to login.",
+                    type(exc).__name__,
+                )
+            await self._login_with_retries()
+
+    async def _login_with_retries(self):
+        """Log in with retries and backoff; callers must hold ``_login_lock``."""
 
         async def _attempt():
             try:

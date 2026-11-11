@@ -92,10 +92,13 @@ class HiveAction(ActionCompatMixin, BaseDeviceHandler):
             await self.session.hive_refresh_tokens()
             data = self.session.data.actions[device.hive_id].copy()
             data.update({"enabled": enabled})
-            resp = await self.session.api.set_action(device.hive_id, json.dumps(data))
+            async with self.session.write_semaphore:
+                resp = await self.session.api.set_action(
+                    device.hive_id, json.dumps(data)
+                )
             if resp["original"] == HTTP_OK:
                 final = True
-                await self.session.get_devices(device.hive_id)
+                await self.session.refresh_after_change()
 
         return final
 

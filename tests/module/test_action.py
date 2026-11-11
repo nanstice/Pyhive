@@ -25,6 +25,7 @@ def _make_action(actions=None):
     )
     session.hive_refresh_tokens = AsyncMock()
     session.get_devices = AsyncMock(return_value=True)
+    session.refresh_after_change = AsyncMock(return_value=True)
     session.api = MagicMock()
     session.api.set_action = AsyncMock(
         return_value={"original": HTTP_200, "parsed": {}}
@@ -106,12 +107,12 @@ class TestSetActionState:
     """Tests for HiveAction._set_action_state."""
 
     async def test_http_200_returns_true(self):
-        """_set_action_state returns True and calls get_devices on HTTP 200."""
+        """_set_action_state returns True and refreshes device data on HTTP 200."""
         action = _make_action(
             {"action-1": {"id": "action-1", "name": "GN", "enabled": False}}
         )
         assert await action._set_action_state(_make_device(), True) is True  # noqa: SLF001
-        action.session.get_devices.assert_called_once()
+        action.session.refresh_after_change.assert_awaited_once()
 
     async def test_non_200_returns_false(self):
         """_set_action_state returns False when the API returns a non-200 status."""

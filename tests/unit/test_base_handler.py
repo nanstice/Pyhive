@@ -5,7 +5,15 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from apyhiveapi.helper.const import MAX_CONCURRENT_WRITES
 from apyhiveapi.helper.device_handler_base import BaseDeviceHandler
+from apyhiveapi.helper.hive_exceptions import (
+    HiveApiError,
+    HiveAuthError,
+    HiveRateLimited,
+    HiveReauthRequired,
+)
 from apyhiveapi.helper.hivedataclasses import Device
 from apyhiveapi.helper.map import Map
 
@@ -24,6 +32,9 @@ def _make_session(products=None):
     )
     session.hive_refresh_tokens = AsyncMock()
     session.get_devices = AsyncMock(return_value=True)
+    session.refresh_after_change = AsyncMock(return_value=True)
+    session.recover_auth = AsyncMock()
+    session.write_semaphore = asyncio.Semaphore(MAX_CONCURRENT_WRITES)
     session.api = MagicMock()
     session.api.set_state = AsyncMock(return_value={"original": 200, "parsed": {}})
     return session
@@ -146,8 +157,8 @@ class TestExecuteStateChange:
         d.device_data = None
         assert await h._execute_state_change(d, mode="MANUAL") is False
 
-    async def test_http_200_returns_true_and_calls_get_devices(self):
-        """Returns True on HTTP 200 and refreshes device data via get_devices."""
+    async def test_http_200_returns_true_and_refreshes(self):
+        """Returns True on HTTP 200 and refreshes through the shared refresh."""
         session = _make_session({"prod-1": {"type": "heating"}})
         session.api.set_state = AsyncMock(return_value={"original": 200, "parsed": {}})
         h = _make_handler(session)
@@ -155,7 +166,8 @@ class TestExecuteStateChange:
         result = await h._execute_state_change(d, mode="MANUAL")
         assert result is True
         session.hive_refresh_tokens.assert_called_once()
-        session.get_devices.assert_called_once_with("prod-1")
+        session.refresh_after_change.assert_awaited_once_with()
+        session.get_devices.assert_not_called()
 
     async def test_non_200_returns_false(self):
         """Returns False on non-200 HTTP status and does not call get_devices."""
@@ -184,3 +196,83 @@ class TestExecuteStateChange:
         d = _make_device()
         assert await h._execute_state_change(d, mode="MANUAL") is False
         session.get_devices.assert_not_called()
+
+
+class TestExecuteStateChangeRateLimiting:
+    """Write limit, auth recovery and 429 handling in _execute_state_change."""
+
+    async def test_concurrent_writes_capped_by_semaphore(self):
+        """A burst of changes never has more than MAX_CONCURRENT_WRITES in flight."""
+        products = {f"prod-{i}": {"type": "warmwhitelight"} for i in range(10)}
+        session = _make_session(products)
+        in_flight = 0
+        peak = 0
+
+        async def _set_state(*_args, **_kwargs):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return {"original": 200, "parsed": {}}
+
+        session.api.set_state = AsyncMock(side_effect=_set_state)
+        h = _make_handler(session)
+        results = await asyncio.gather(
+            *(
+                h._execute_state_change(_make_device(hive_id=pid), status="ON")
+                for pid in products
+            )
+        )
+        assert all(results)
+        assert session.api.set_state.await_count == len(products)
+        assert peak == MAX_CONCURRENT_WRITES
+
+    async def test_auth_error_recovers_and_retries_once(self):
+        """A 401/403 renews tokens with the pre-request timestamp and retries."""
+        session = _make_session({"prod-1": {"type": "heating"}})
+        session.api.set_state = AsyncMock(
+            side_effect=[HiveAuthError(), {"original": 200, "parsed": {}}]
+        )
+        h = _make_handler(session)
+        assert await h._execute_state_change(_make_device(), mode="MANUAL") is True
+        session.recover_auth.assert_awaited_once_with(session.tokens.token_created)
+        assert session.api.set_state.await_count == 2  # noqa: PLR2004
+        session.refresh_after_change.assert_awaited_once()
+
+    async def test_auth_error_twice_returns_false(self):
+        """A second rejection after renewing tokens returns False, not raises."""
+        session = _make_session({"prod-1": {"type": "heating"}})
+        session.api.set_state = AsyncMock(side_effect=HiveAuthError())
+        h = _make_handler(session)
+        assert await h._execute_state_change(_make_device(), mode="MANUAL") is False
+        session.recover_auth.assert_awaited_once()
+        assert session.api.set_state.await_count == 2  # noqa: PLR2004
+        session.refresh_after_change.assert_not_called()
+
+    async def test_reauth_required_during_recovery_propagates(self):
+        """HiveReauthRequired from recovery reaches the caller so HA can reauth."""
+        session = _make_session({"prod-1": {"type": "heating"}})
+        session.api.set_state = AsyncMock(side_effect=HiveAuthError())
+        session.recover_auth = AsyncMock(side_effect=HiveReauthRequired())
+        h = _make_handler(session)
+        with pytest.raises(HiveReauthRequired):
+            await h._execute_state_change(_make_device(), mode="MANUAL")
+        assert session.api.set_state.await_count == 1
+
+    async def test_rate_limited_returns_false_without_retry(self):
+        """A 429 returns False and does not renew tokens or retry."""
+        session = _make_session({"prod-1": {"type": "heating"}})
+        session.api.set_state = AsyncMock(side_effect=HiveRateLimited(retry_after=5))
+        h = _make_handler(session)
+        assert await h._execute_state_change(_make_device(), mode="MANUAL") is False
+        session.recover_auth.assert_not_called()
+        assert session.api.set_state.await_count == 1
+
+    async def test_other_api_error_still_raises(self):
+        """Non-auth, non-429 API errors keep their existing behaviour (raise)."""
+        session = _make_session({"prod-1": {"type": "heating"}})
+        session.api.set_state = AsyncMock(side_effect=HiveApiError())
+        h = _make_handler(session)
+        with pytest.raises(HiveApiError):
+            await h._execute_state_change(_make_device(), mode="MANUAL")

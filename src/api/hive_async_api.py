@@ -13,8 +13,14 @@ from aiohttp import (
     web_exceptions,
 )
 
-from ..helper.const import HTTP_FORBIDDEN, HTTP_UNAUTHORIZED
-from ..helper.hive_exceptions import FileInUse, HiveApiError, HiveAuthError, NoApiToken
+from ..helper.const import HTTP_FORBIDDEN, HTTP_TOO_MANY_REQUESTS, HTTP_UNAUTHORIZED
+from ..helper.hive_exceptions import (
+    FileInUse,
+    HiveApiError,
+    HiveAuthError,
+    HiveRateLimited,
+    NoApiToken,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +106,16 @@ class HiveApiAsync:
             if str(resp.status).startswith("20"):
                 return resp
 
+        if resp.status == HTTP_TOO_MANY_REQUESTS:
+            retry_after = self._parse_retry_after(resp.headers.get("Retry-After"))
+            _LOGGER.warning(
+                "Hive rate limited calling %s - HTTP 429 (Retry-After: %s)",
+                url,
+                retry_after,
+            )
+            raise HiveRateLimited(
+                f"Rate limited calling {url} — HTTP 429", retry_after=retry_after
+            )
         if resp.status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
             _LOGGER.error(
                 "Hive token rejected calling %s - HTTP %s — response: %s",
@@ -117,6 +133,21 @@ class HiveApiAsync:
             resp_body[:200],
         )
         raise HiveApiError
+
+    @staticmethod
+    def _parse_retry_after(value: str | None) -> float | None:
+        """Return the Retry-After header as seconds, or None if not a number.
+
+        The header may also hold an HTTP date; that form is ignored and the
+        caller falls back to its normal interval.
+        """
+        if value is None:
+            return None
+        try:
+            seconds = float(value)
+        except ValueError:
+            return None
+        return seconds if seconds >= 0 else None
 
     async def _call_endpoint(self, method: str, url: str, data=None) -> dict:
         """Call an endpoint and return {"original": status, "parsed": json}."""

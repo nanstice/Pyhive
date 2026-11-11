@@ -43,6 +43,20 @@ class HiveAuthError(HiveApiError):
     """
 
 
+class HiveRateLimited(HiveApiError):
+    """Hive answered HTTP 429 Too Many Requests.
+
+    Args:
+        HiveApiError (object): Parent API error class
+        retry_after (float | None): Seconds Hive asked us to wait, from the
+            ``Retry-After`` header, or None when it gave no usable value.
+    """
+
+    def __init__(self, message: str = "", retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class HiveRefreshTokenExpired(HiveApiError):
     """Refresh token expired.
 

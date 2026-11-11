@@ -28,6 +28,7 @@ def _make_action(actions=None):
     )
     session.hive_refresh_tokens = AsyncMock()
     session.get_devices = AsyncMock(return_value=True)
+    session.refresh_after_change = AsyncMock(return_value=True)
     session.api = MagicMock()
     session.api.set_action = AsyncMock(
         return_value={"original": HTTP_200, "parsed": {}}
