@@ -144,6 +144,8 @@ class Light(LightCompatMixin, HiveLight):
                     device.ha_name,
                 )
                 return cached
+        if device.is_group:
+            return await self._get_light_group(device)
         online = await self.session.attr.online_offline(device.device_id)
         if not isinstance(device.device_data, dict):
             device.device_data = {}
@@ -185,6 +187,46 @@ class Light(LightCompatMixin, HiveLight):
         )
         device.status = device.status or {"state": None}
         return device
+
+    async def _get_light_group(self, device: Device):
+        """Update a Hive light group from its group product.
+
+        A group has no entry in ``data.devices``, so its availability and
+        props come from the group product. The member lights are separate
+        entities and are polled as usual.
+
+        Args:
+            device (Device): Group light to update.
+
+        Returns:
+            Device: Updated device; unavailable if the group has been deleted.
+        """
+        product = self.session.data.products.get(device.hive_id)
+        if product is None:
+            device.device_data = {**(device.device_data or {}), "online": False}
+            device.status = device.status or {"state": None}
+            return device
+        props = self.session.helper.get_light_group_device(product)["props"]
+        device.device_data = props
+        device.status = {
+            "state": await self.get_state(device),
+            "brightness": await self.get_brightness(device),
+        }
+        if props["online"] and device.hive_type in (
+            "tuneablelight",
+            "colourtuneablelight",
+        ):
+            device.status["color_temp"] = await self.get_color_temp(device)
+        if props["online"] and device.hive_type == "colourtuneablelight":
+            mode = await self.get_color_mode(device)
+            device.status["mode"] = mode
+            if mode == "COLOUR":
+                device.status["hs_color"] = await self.get_color(device)
+        device.attributes = {"available": props["online"]}
+        _LOGGER.debug(
+            "get_light - Light group data for %s: %s", device.ha_name, device.status
+        )
+        return self.session.set_cached_device(device)
 
     async def turn_on(
         self,

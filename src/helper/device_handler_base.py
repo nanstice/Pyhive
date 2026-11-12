@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-from .const import HIVETOHA, HTTP_OK
+from .const import HIVE_TYPES, HIVETOHA, HTTP_OK, LIGHT_GROUP_NODE_TYPE
 from .hivedataclasses import Device
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,9 +40,14 @@ class BaseDeviceHandler:  # pylint: disable=too-few-public-methods
             return False
         await self.session.hive_refresh_tokens()
         data = self.session.data.products[device.hive_id]
+        product_type = data["type"]
+        if data.get("isGroup") and product_type in HIVE_TYPES["Light"]:
+            # Hive's app changes a light group at /nodes/productgroup/<id>;
+            # posting to /nodes/<light type>/<id> gets 400 MALFORMED_REQUEST.
+            product_type = LIGHT_GROUP_NODE_TYPE
         try:
             resp = await self.session.api.set_state(
-                data["type"], device.hive_id, **state_kwargs
+                product_type, device.hive_id, **state_kwargs
             )
         except asyncio.TimeoutError:
             # Honour the documented False-on-failure contract so one slow

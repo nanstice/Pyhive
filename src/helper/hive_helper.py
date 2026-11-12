@@ -169,6 +169,8 @@ class HiveHelper:
                 device = self.session.data.devices[product["props"]["trvs"][0]]
             else:
                 raise KeyError(f"no TRVs linked to trvcontrol product {product_id}")
+        elif product.get("isGroup") and product_type in HIVE_TYPES["Light"]:
+            device = self.get_light_group_device(product)
         elif (
             product_type == "warmwhitelight" and product["props"]["model"] == "SIREN001"
         ):
@@ -179,6 +181,36 @@ class HiveHelper:
             device = self.session.data.devices[product["id"]]
 
         return device
+
+    @staticmethod
+    def get_light_group_device(product: dict) -> dict:
+        """Build device data for a Hive light group.
+
+        A group has no physical device of its own, so the group product stands
+        in for one. Home Assistant reads ``model``, ``manufacturer`` and
+        ``version`` when it creates the entity, so defaults are filled in for
+        any the group doesn't report.
+
+        Args:
+            product (dict): Group product data.
+
+        Returns:
+            dict: Device data keyed like an entry in ``data.devices``.
+        """
+        props = {
+            "model": "Light group",
+            "manufacturer": "Hive",
+            "version": "",
+            "online": True,
+            **(product.get("props") or {}),
+        }
+        return {
+            "id": product["id"],
+            "type": product["type"],
+            "parent": product.get("parent"),
+            "state": product.get("state", {}),
+            "props": props,
+        }
 
     def convert_minutes_to_time(self, minutes_to_convert: int):
         """Convert minutes string to datetime.
